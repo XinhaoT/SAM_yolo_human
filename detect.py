@@ -25,28 +25,39 @@ from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.layers import paste_masks_in_image
 
 
-global next_flag
 global global_input_points
+global predict_flag
 global global_input_negative_points
 
 
 def OnMouseAction(event, x, y, flags, param):
-    global next_flag
+    global global_input_negative_points
     global global_input_points
-    if event == cv2.EVENT_LBUTTONDOWN: 
+    global predict_flag
+
+    if flags == cv2.EVENT_FLAG_CTRLKEY + cv2.EVENT_FLAG_LBUTTON:
+        global_input_negative_points.append((x, y))
+        predict_flag = 1
+        print("ctrl+鼠标左键") 
+
+    elif event == cv2.EVENT_LBUTTONDOWN: 
         global_input_points.append((x, y))
+        predict_flag = 1
         print("单击了鼠标左键") 
-    if event==cv2.EVENT_LBUTTONDBLCLK:
-        next_flag = 1
+
+    
 
 
 
 
 def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1):
-    global next_flag
+
     global global_input_points
+    global global_input_negative_points
+    global predict_flag
+
     predictor.set_image(image_without_mask)
-    global_input_points, next_flag = [], 0
+    global_input_points,  global_input_negative_points,predict_flag = [],[], 0
 
     #candidate_points = (key_points[4:]).reshape((18, 3))
     input_point = []
@@ -59,40 +70,63 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1):
     pts=np.array([[w0,h0], [w1,h0], [w1,h1], [w0,h1]], np.int32)
     pts=pts.reshape((-1,1,2)) 
     img_marked = cv2.polylines(img_marked, [pts], True, (0,0,255),8) 
-
+    img_show = img_marked.copy()
     while True:
-        cv2.imshow("test", img_marked) 
+        cv2.imshow("test", img_show) 
         
-        cv2.waitKey()
-
-        input_point = np.array(global_input_points)
-        input_label = np.array([1]*input_point.shape[0])
-
-        print("input points:", input_point)
-
-        if input_point.size == 0:
+        key = cv2.waitKey(1)
+        if key == ord(' '):
+            print("Prompt finish")
+            image_without_mask[masks[0] == False] = np.array([0, 0, 0])
+            return True, image_without_mask
+        elif key == ord('n'):
+            print("discard this image")
             return False, image_without_mask
+
         
-        img_marked = cv2.circle(img_marked, (global_input_points[-1][0], global_input_points[-1][1]), 1, (255, 0, 0), 3)
+        # elif key == ord('e'):
+        # elif key == ord('t'):
+        # elif key == ord('c'):
+        # elif key == 27:
+        #     finish = True
+        
+        if predict_flag:
+            input_point = np.array(global_input_points + global_input_negative_points)
+            print("input points:", input_point)
+            input_label = np.array([1]*len(global_input_points) + [0]*len(global_input_negative_points))
+            print("input labels:", input_label)
 
-        masks, scores, logits = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
-        multimask_output=False,
-        )
+            if len(global_input_points) + len(global_input_negative_points)<=1:
 
-        img_marked[masks[0]] = img_marked[masks[0]] * 0.5 + np.array([0, 255, 0], dtype=np.uint8) * 0.5
-
-        if next_flag == 1:
-            print("Break")
-            break
+                masks, scores, logits = predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                multimask_output=False,
+                )
+            else:
+                mask_input = logits[np.argmax(scores), :, :]
+                masks, _, _ = predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                mask_input=mask_input[None,:,:],
+                multimask_output=False,
+                )
+            predict_flag = 0
+            if len(global_input_points)>0:
+                img_marked = cv2.circle(img_marked, (global_input_points[-1][0], global_input_points[-1][1]), 3, (255, 0, 0), 3)
+            if len(global_input_negative_points)>0:
+                img_marked = cv2.circle(img_marked, (global_input_negative_points[-1][0], global_input_negative_points[-1][1]), 3, (0, 0, 255), 3)
+            img_show[masks[0]] = img_marked[masks[0]] * 0.5 + np.array([0, 255, 0], dtype=np.uint8) * 0.5
+        # if next_flag == 1:
+        #     print("Break")
+        #     break
 
     
     # if input_point.size == 0:
     #     return False, image_without_mask
 
 
-    image_without_mask[masks[0] == False] = np.array([0, 0, 0])
+    
     return True, image_without_mask
 
 def fetch_skeleton(image, model, device, height=640):
@@ -238,13 +272,13 @@ def detect(save_img=False):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     with open('data/hyp.scratch.mask.yaml') as f:
         hyp = yaml.load(f, Loader=yaml.FullLoader)
-    weigths = torch.load('yolov7-mask.pt')
+    weigths = torch.load('checkpoints/yolo/yolov7-mask.pt')
     model_seg = weigths['model']
     model_seg = model_seg.half().to(device)
     _ = model_seg.eval()
 
 
-    weigths_pose = torch.load('yolov7-w6-pose.pt')
+    weigths_pose = torch.load('checkpoints/yolo/yolov7-w6-pose.pt')
     model_pose = weigths_pose['model']
     model_pose = model_pose.half().to(device)
     _ = model_pose.eval()
@@ -252,7 +286,7 @@ def detect(save_img=False):
 
     from sma.segment_anything import sam_model_registry, SamPredictor
 
-    sam_checkpoint = "sam_vit_l_0b3195.pth"
+    sam_checkpoint = "checkpoints/SAM/sam_vit_l_0b3195.pth"
     model_type = "vit_l"
 
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
@@ -423,8 +457,8 @@ def detect(save_img=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default='yolov7.pt', help='model.pt path(s)')
-    parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
+    parser.add_argument('--weights', nargs='+', type=str, default='checkpoints/yolo/yolov7.pt', help='model.pt path(s)')
+    parser.add_argument('--source', type=str, default='dataset/images', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
