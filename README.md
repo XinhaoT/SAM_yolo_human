@@ -10,11 +10,11 @@ Install the requirements from [YOLOv7](https://github.com/WongKinYiu/yolov7/tree
 
 Install detectron2 from [Detectron2](https://detectron2.readthedocs.io/en/latest/tutorials/install.html)
 
-> `git clone https://github.com/facebookresearch/detectron2.git`
+`git clone https://github.com/facebookresearch/detectron2.git`
 
 Installing the repository
 
-> `python -m pip install -e detectron2`
+`python -m pip install -e detectron2`
 
 For windows user, please refer to [this issue](https://github.com/facebookresearch/detectron2/issues/1601) if you have trouble in installing detectron2.
 
