@@ -16,7 +16,7 @@ from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages, letterbox
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path, non_max_suppression_mask_conf, non_max_suppression_kpt
-from utils.plots import plot_one_box, output_to_keypoint
+from utils.plots import plot_one_box, output_to_keypoint, plot_skeleton_kpts
 from utils.torch_utils import select_device, load_classifier, time_synchronized, TracedModel
 
 from detectron2.modeling.poolers import ROIPooler
@@ -28,6 +28,7 @@ from detectron2.layers import paste_masks_in_image
 global global_input_points
 global predict_flag
 global global_input_negative_points
+
 
 
 def OnMouseAction(event, x, y, flags, param):
@@ -50,7 +51,7 @@ def OnMouseAction(event, x, y, flags, param):
 
 
 
-def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1):
+def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1, ratio=(1,1)):
 
     global global_input_points
     global global_input_negative_points
@@ -59,44 +60,39 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1):
     predictor.set_image(image_without_mask)
     global_input_points,  global_input_negative_points,predict_flag = [],[], 0
 
-    #candidate_points = (key_points[4:]).reshape((18, 3))
-    input_point = []
-    # for i in range(18):
-    #     if candidate_points[i, 2] > 0.1:
-    #         x = w0 + candidate_points[i, 0]*ratio
-    #         y = h0 + candidate_points[i, 1]*ratio
-    #         input_point.append([x, y])
-    img_marked = image_without_mask.copy()
+    candidate_points = (key_points[7:]).reshape((17, 3))
+    # candidate_points = (key_points[4:-3]).reshape((17, 3))
+    print(candidate_points)
+    for i in range(17):
+        x = w0 + candidate_points[i, 0]*ratio[0]
+        y = h0 + candidate_points[i, 1]*ratio[1]
+        # x = candidate_points[i, 0]*ratio
+        # y = candidate_points[i, 1]*ratio
+        x = int(x)
+        y = int(y)
+        # x = int(candidate_points[i][0])
+        # y = int(candidate_points[i][1])
+        global_input_points.append([x, y])
+    
+    predict_flag=1
+    init_pts_num = len(global_input_points)
+
+    img_raw = image_without_mask.copy()
     pts=np.array([[w0,h0], [w1,h0], [w1,h1], [w0,h1]], np.int32)
     pts=pts.reshape((-1,1,2)) 
-    img_marked = cv2.polylines(img_marked, [pts], True, (0,0,255),8) 
-    img_show = img_marked.copy()
+    img_masked = image_without_mask.copy()
+    img_bbox = cv2.polylines(img_masked, [pts], True, (0,0,255),8) 
+    masks=None
+    
     while True:
-        cv2.imshow("test", img_show) 
-        
-        key = cv2.waitKey(1)
-        if key == ord(' '):
-            print("Prompt finish")
-            image_without_mask[masks[0] == False] = np.array([0, 0, 0])
-            return True, image_without_mask
-        elif key == ord('n'):
-            print("discard this image")
-            return False, image_without_mask
 
-        
-        # elif key == ord('e'):
-        # elif key == ord('t'):
-        # elif key == ord('c'):
-        # elif key == 27:
-        #     finish = True
-        
         if predict_flag:
             input_point = np.array(global_input_points + global_input_negative_points)
             print("input points:", input_point)
             input_label = np.array([1]*len(global_input_points) + [0]*len(global_input_negative_points))
             print("input labels:", input_label)
 
-            if len(global_input_points) + len(global_input_negative_points)<=1:
+            if len(global_input_points) + len(global_input_negative_points)<=init_pts_num:
 
                 masks, scores, logits = predictor.predict(
                 point_coords=input_point,
@@ -111,12 +107,37 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1):
                 mask_input=mask_input[None,:,:],
                 multimask_output=False,
                 )
+                print(masks.shape)
+                print(masks.sum())
             predict_flag = 0
-            if len(global_input_points)>0:
-                img_marked = cv2.circle(img_marked, (global_input_points[-1][0], global_input_points[-1][1]), 3, (255, 0, 0), 3)
-            if len(global_input_negative_points)>0:
-                img_marked = cv2.circle(img_marked, (global_input_negative_points[-1][0], global_input_negative_points[-1][1]), 3, (0, 0, 255), 3)
-            img_show[masks[0]] = img_marked[masks[0]] * 0.5 + np.array([0, 255, 0], dtype=np.uint8) * 0.5
+            
+            img_masked = image_without_mask.copy()
+            img_masked[masks[0]] = img_raw[masks[0]] * 0.5 + np.array([0, 255, 0], dtype=np.uint8) * 0.5
+            img_bbox = cv2.polylines(img_masked, [pts], True, (255,0,255),8) 
+
+            for pos in global_input_points:
+                img_bbox = cv2.circle(img_bbox, (pos[0], pos[1]), 3, (255, 0, 0), 3)
+            for pos in global_input_negative_points:
+                img_bbox = cv2.circle(img_bbox, (pos[0], pos[1]), 3, (0, 0, 255), 3)
+        
+        key = cv2.waitKey(1)
+        if key == ord(' '):
+            print("Prompt finish")
+            if masks is not None:
+                image_without_mask[masks[0] == False] = np.array([0, 0, 0])
+                return True, image_without_mask
+            else:
+                print("discard this image")
+                return False, image_without_mask
+        elif key == ord('n'):
+            print("discard this image")
+            return False, image_without_mask
+        
+        elif key==27:
+            print("exit")
+            exit(0)
+        cv2.imshow("test", img_bbox) 
+
         # if next_flag == 1:
         #     print("Break")
         #     break
@@ -155,6 +176,7 @@ def fetch_skeleton(image, model, device, height=640):
 def add_mask(image, model, device, hyp, height=640):
 
     #downscale the image
+    
     image = letterbox(image, height, stride=64, auto=True)[0]
     image_ = image.copy()
     image = transforms.ToTensor()(image)
@@ -230,15 +252,14 @@ def save_sub_image(img, xyxy, frame_idx, bbx_idx, device, model_seg, model_pose,
 
     
     img, image_without_mask = add_mask(img[int(center_y-height/2):int(center_y+height/2), int(center_x-width/2):int(center_x+width/2)], model_seg, device, hyp, height=aim_shape[0])
-                   
-    print("subimage saved", "sub_image_path: ", save_path)
-
+    ratio = (width/ img.shape[1], height / img.shape[0])
 
     key_points = fetch_skeleton(img, model_pose, device)
     if key_points.size == 0:
         return False, {}
 
-    success, image = segment_anything(orig_img, key_points, predictor, int(center_y-height/2), int(center_x-width/2), int(center_y+height/2), int(center_x+width/2))
+    success, image = segment_anything(orig_img, key_points, predictor, int(center_y-height/2), int(center_x-width/2),
+     int(center_y+height/2), int(center_x+width/2), ratio)
 
     if not success:
         return False, {}
@@ -246,6 +267,7 @@ def save_sub_image(img, xyxy, frame_idx, bbx_idx, device, model_seg, model_pose,
     image = cv2.resize(image[int(center_y-height/2):int(center_y+height/2), int(center_x-width/2):int(center_x+width/2)], (320, 640))
 
     cv2.imwrite(save_path, image)
+    print("subimage saved", "sub_image_path: ", save_path)
     info_dict = {
         "sub_image_path": save_path,
         "height": aim_shape[0],
@@ -264,7 +286,6 @@ def save_sub_image(img, xyxy, frame_idx, bbx_idx, device, model_seg, model_pose,
 
 
 def detect(save_img=False):
-
     cv2.namedWindow("test") 
     cv2.setMouseCallback("test", OnMouseAction)
 
