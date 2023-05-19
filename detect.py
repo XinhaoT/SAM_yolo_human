@@ -81,7 +81,7 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1, 
     pts=np.array([[w0,h0], [w1,h0], [w1,h1], [w0,h1]], np.int32)
     pts=pts.reshape((-1,1,2)) 
     img_masked = image_without_mask.copy()
-    img_bbox = cv2.polylines(img_masked, [pts], True, (0,0,255),8) 
+    img_bbox = cv2.polylines(img_masked, [pts], True, (0,0,255),2) 
     masks=None
     
     while True:
@@ -109,11 +109,17 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1, 
                 )
                 print(masks.shape)
                 print(masks.sum())
+            
             predict_flag = 0
             
             img_masked = image_without_mask.copy()
-            img_masked[masks[0]] = img_raw[masks[0]] * 0.5 + np.array([0, 255, 0], dtype=np.uint8) * 0.5
-            img_bbox = cv2.polylines(img_masked, [pts], True, (255,0,255),8) 
+            img_masked[masks[0]] = img_raw[masks[0]] * 0.5 + np.array([0, 0, 255], dtype=np.uint8) * 0.5
+
+            nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(np.uint8(masks[0]) * 255, 4, cv2.CV_32S)
+            max_label, max_size = max([(i, stats[i, cv2.CC_STAT_AREA]) for i in range(1, nb_components)], key=lambda x: x[1])
+            
+            img_masked[output==max_label] = img_raw[output==max_label] * 0.5 + np.array([0, 255, 0], dtype=np.uint8) * 0.5
+            img_bbox = cv2.polylines(img_masked, [pts], True, (255,0,255),2) 
 
             for pos in global_input_points:
                 img_bbox = cv2.circle(img_bbox, (pos[0], pos[1]), 3, (255, 0, 0), 3)
@@ -124,7 +130,7 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1, 
         if key == ord(' '):
             print("Prompt finish")
             if masks is not None:
-                image_without_mask[masks[0] == False] = np.array([0, 0, 0])
+                image_without_mask[output!=max_label] = np.array([0, 0, 0])
                 return True, image_without_mask
             else:
                 print("discard this image")
@@ -150,8 +156,7 @@ def segment_anything(image_without_mask, key_points, predictor, h0, w0, h1, w1, 
     
     return True, image_without_mask
 
-def fetch_skeleton(image, model, device, height=640):
-    image = letterbox(image, height, stride=64, auto=True)[0]
+def fetch_skeleton(image, model, device):
     image_ = image.copy()
     image = transforms.ToTensor()(image)
     image = torch.tensor(np.array([image.numpy()]))
@@ -194,7 +199,7 @@ def add_mask(image, model, device, hyp, height=640):
     pooler = ROIPooler(output_size=hyp['mask_resolution'], scales=(pooler_scale,), sampling_ratio=1, pooler_type='ROIAlignV2', canonical_level=2)
 
     output, output_mask, output_mask_score, output_ac, output_ab = non_max_suppression_mask_conf(inf_out, attn, bases, pooler, hyp, conf_thres=0.25, iou_thres=0.65, merge=False, mask_iou=None)
-
+    print(output)
     pred, pred_masks = output[0], output_mask[0]
     base = bases[0]
     bboxes = Boxes(pred[:, :4])
@@ -250,8 +255,14 @@ def save_sub_image(img, xyxy, frame_idx, bbx_idx, device, model_seg, model_pose,
         print("Warning: Too Small!", save_path)
         return False, {}
 
+    if opt.mode == 'multi':
+        img, image_without_mask = add_mask(img[int(center_y-height/2):int(center_y+height/2), int(center_x-width/2):int(center_x+width/2)], model_seg, device, hyp, height=aim_shape[0])
+    elif opt.mode == 'single':
+        img = img[int(center_y-height/2):int(center_y+height/2), int(center_x-width/2):int(center_x+width/2)]
     
-    img, image_without_mask = add_mask(img[int(center_y-height/2):int(center_y+height/2), int(center_x-width/2):int(center_x+width/2)], model_seg, device, hyp, height=aim_shape[0])
+    yolo_max_size = opt.yolo_size
+    img = letterbox(img, yolo_max_size, stride=64, auto=True)[0]
+    
     ratio = (width/ img.shape[1], height / img.shape[0])
 
     key_points = fetch_skeleton(img, model_pose, device)
@@ -481,6 +492,7 @@ if __name__ == '__main__':
     parser.add_argument('--weights', nargs='+', type=str, default='checkpoints/yolo/yolov7.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='dataset/images', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
+    parser.add_argument('--yolo-size', type=int, default=640, help='inference size (pixels) for yolo')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -497,6 +509,7 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
     parser.add_argument('--logfile-path', type=str, default='dataset/datalog.json')
+    parser.add_argument('--mode', type=str, default='multi', help='multi|single person')
     opt = parser.parse_args()
     print(opt)
     #check_requirements(exclude=('pycocotools', 'thop'))
